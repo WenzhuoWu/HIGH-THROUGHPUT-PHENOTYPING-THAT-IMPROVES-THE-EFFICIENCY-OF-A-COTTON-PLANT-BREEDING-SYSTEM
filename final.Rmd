@@ -1,0 +1,386 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+
+
+### Introduction
+
+Unmanned Aerial Vehicles (UAVs) play an important role in agricultural research because they facilitate high-throughput phenotyping (HTP).The ability to identify cotton plant height and boll count across a field can serve as an important tool in predicting plant growth and yield. In order to capture a three-dimensional (3D) view of field plots, which is believed to be helpful in estimating yield and crop development parameters, sensors mounted on UAVs must have access to a view of the ground. However, cotton planted in solid rows can obscure this view. Canopy closure prevents sensors from measuring plant architecture and boll-loads three dimensionally from the midgrowing
+season until the crop is defoliated. Therefore, this project was initiated to compare solid vs. skip-row planting patterns in terms of predicting yield and fiber quality since skip rows would allow UAV sensors to capture more accurate 3D data from plots. The purposes of this project were to 
+(1) compare the accuracy of UAV-derived data from different row patterns
+(2) evaluate the ability of UAVs to predict plant yield and 
+(3) characterize genotype x row pattern interaction and how location and year affect that interaction.
+
+
+#### Objective 1: Accuracy between different row patterns
+
+The height measured by UAV and human was compared.
+```{r}
+df <- read.csv("/Users/wenzhuowu/Desktop/tamu-project/height1.csv", header=TRUE)
+head(df)
+```
+
+```{r}
+lm1 = lm(UAV_h~Manual_h, data = df[df$row_pattern=='solid',]) #Create the linear regression
+summary(lm1) 
+library(ggplot2)
+
+
+ggplot(df[df$row_pattern=='solid',],aes(Manual_h, UAV_h)) +
+  geom_point() +
+  geom_smooth(method='lm', se=FALSE, color='turquoise4') +
+  theme_minimal() +
+  labs(x='Manually meaasured plant height', y='UAV derived plant height', title='Solid row pattern') +
+  theme(plot.title = element_text(hjust=0.5, size=20, face='bold')) 
+```
+```{r}
+lm2 = lm(UAV_h~Manual_h, data = df[df$row_pattern=='skip',]) #Create the linear regression
+summary(lm2) 
+ggplot(df[df$row_pattern=='skip',],aes(Manual_h, UAV_h)) +
+  geom_point() +
+  geom_smooth(method='lm', se=FALSE, color='turquoise4') +
+  theme_minimal() +
+  labs(x='Manually meaasured plant height', y='UAV derived plant height', title='Skip row pattern') +
+  theme(plot.title = element_text(hjust=0.5, size=20, face='bold')) 
+```
+
+The skip-row planting pattern provided a more accurate plant height (R2 0.97) with lower levels of error (RMSE 3.557) compared to data
+collected from the solid-row pattern (R2 0.77; RMSE 8.942 ). Row pattern may have an impact on the accuracy of plant height model based on UAV images.
+
+#### Objective 2: Yield prediction
+
+Plant height (ph), canopy colume (cv), canopy cover (cc), vegetation index NDVI, ExG were generated from UAV images across multiple dates. Boll count and boll area were processed based on the images taken the day before harvest.
+
+```{r, results='hide'}
+library(plyr)
+library(readr)
+library(dplyr)
+library(glmnet)
+library(ggplot2)
+library(tidyverse)
+library(caret)
+library(leaps)
+library(MASS)
+
+```
+
+```{r}
+dat <- read.csv("/Users/wenzhuowu/Desktop/tamu-project/timeline.csv", header=TRUE)
+dat = na.omit(dat)
+head(dat)
+```
+
+
+
+Data partition
+
+```{r}
+set.seed(100) 
+
+index = sample(1:nrow(dat), 0.8*nrow(dat)) 
+
+train = dat[index,] # Create the training data 
+test = dat[-index,] # Create the test data
+```
+
+Scaling the Numeric Features
+
+```{r}
+cols = colnames(dat)[-1]
+pre_proc_val <- preProcess(train[,cols], method = c("center", "scale"))
+
+train[,cols] = predict(pre_proc_val, train[,cols])
+test[,cols] = predict(pre_proc_val, test[,cols])
+
+```
+
+stepwise regression
+
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+# Set up repeated k-fold cross-validation
+train.control <- trainControl(method = "cv", number = 10)
+# Train the model
+step.model <- train(Yield.per.row ~., data = dat,
+                    method = "leapBackward", 
+                    tuneGrid = data.frame(nvmax = 1:34),
+                    trControl = train.control
+                    )
+step.model$results
+```
+```{r}
+step.model$bestTune
+```
+```{r,results="hide"}
+summary(step.model$finalModel)
+```
+```{r}
+m1 = lm(Yield.per.row ~ CV0730+ NDVI0730, 
+   data = dat)
+summary (m1)
+```
+
+For stepwise regrssion, the RSE is 1.349 and R2 is 53.89 percent.
+
+
+
+ridge 
+
+```{r}
+cols_reg = colnames(dat)
+dummies <- dummyVars(Yield.per.row ~ ., data = dat[,cols_reg])
+train_dummies = predict(dummies, newdata = train[,cols_reg])
+test_dummies = predict(dummies, newdata = test[,cols_reg])
+```
+
+```{r}
+x = as.matrix(train_dummies)
+y_train = train$Yield.per.row
+
+x_test = as.matrix(test_dummies)
+y_test = test$Yield.per.row
+
+lambdas <- 10^seq(2, -3, by = -.1)
+ridge_reg = glmnet(x, y_train, nlambda = 25, alpha = 0, family = 'gaussian', lambda = lambdas)
+summary(ridge_reg)
+```
+
+
+```{r}
+cv_ridge <- cv.glmnet(x, y_train, alpha = 0, lambda = lambdas)
+optimal_lambda <- cv_ridge$lambda.min
+optimal_lambda
+```
+
+The optimal lambda value comes out to be 0.01 and will be used to build the ridge regression model. 
+We  also create a function for calculating and printing the results, which is done with the eval_results() function in the code below. The next step is to use the predict function to generate predictions on the train and test data. Finally, we use the eval_results function to calculate and print the evaluation metrics.
+
+```{r}
+# Compute R^2 from true and predicted values
+eval_results <- function(true, predicted, df) {
+  SSE <- sum((predicted - true)^2)
+  SST <- sum((true - mean(true))^2)
+  R_square <- 1 - SSE / SST
+  RMSE = sqrt(SSE/nrow(df))
+
+  
+  # Model performance metrics
+data.frame(
+  RMSE = RMSE,
+  Rsquare = R_square
+)
+  
+}
+
+# Prediction and evaluation on train data
+predictions_train <- predict(ridge_reg, s = optimal_lambda, newx = x)
+eval_results(y_train, predictions_train, train)
+
+# Prediction and evaluation on test data
+predictions_test <- predict(ridge_reg, s = optimal_lambda, newx = x_test)
+eval_results(y_test, predictions_test, test)
+```
+
+The above output shows that the RMSE and R-squared values for the ridge regression model on the training data are 0.0240 and 99.98 percent, respectively. For the test data, the results for these metrics are 0.6105 and 91.48 percent, respectively. 
+
+
+Lasso
+
+```{r}
+lambdas <- 10^seq(2, -3, by = -.1)
+
+# Setting alpha = 1 implements lasso regression
+lasso_reg <- cv.glmnet(x, y_train, alpha = 1, lambda = lambdas, standardize = TRUE, nfolds = 5)
+
+# Best 
+lambda_best <- lasso_reg$lambda.min 
+lambda_best
+```
+
+The optimal lambda value is 0.001, we train the lasso model in the first line of code below. The second through fifth lines of code generate the predictions and print the evaluation metrics for both the training and test datasets.
+
+```{r}
+lasso_model <- glmnet(x, y_train, alpha = 1, lambda = lambda_best, standardize = TRUE)
+
+predictions_train <- predict(lasso_model, s = lambda_best, newx = x)
+eval_results(y_train, predictions_train, train)
+
+predictions_test <- predict(lasso_model, s = lambda_best, newx = x_test)
+eval_results(y_test, predictions_test, test)
+```
+The above output shows that the RMSE and R-squared values on the training data are 0.0025 and 99.99 percent, respectively. The results on the test data are 0.0064 and 99.99 percent, respectively. Lasso regression can also be used for feature selection because the coeﬃcients of less important features are reduced to zero.
+
+```{r, results="hide"}
+# Set training control
+train_cont <- trainControl(method = "repeatedcv",
+                              number = 10,
+                              repeats = 5,
+                              search = "random",
+                              verboseIter = TRUE)
+
+# Train the model
+elastic_reg <- train(Yield.per.row ~ .,
+                           data = train,
+                           method = "glmnet",
+                           preProcess = c("center", "scale"),
+                           tuneLength = 10,
+                           trControl = train_cont)
+
+```
+
+```{r}
+# Best tuning parameter
+elastic_reg$bestTune
+```
+
+After we have trained the model, the optimal alpha is 0.86 and lambda is 0.0021.
+
+
+```{r}
+# Make predictions on training set
+predictions_train <- predict(elastic_reg, x)
+eval_results(y_train, predictions_train, train) 
+
+# Make predictions on test set
+predictions_test <- predict(elastic_reg, x_test)
+eval_results(y_test, predictions_test, test)
+```
+
+The above output shows that the RMSE and R-squared values for the elastic net regression model on the training data are 0.0563 and 99.99 percent, respectively. The results for these metrics on the test data are 0.0694 and 99.89 percent, respectively.
+
+
+#### Objective 3: The influence of row pattern on yield ranking of 5 varieties
+
+```{r}
+library(tidyverse)
+data1 <- read.csv("/Users/wenzhuowu/Desktop/tamu-project/2-year-3-location-split.csv", header=TRUE)
+str(data1)
+```
+
+This considers a ficticious series of yield trials. There are 2 treatment factors:
+
+-Variety with 5 different genotype with levels Gladdis T08 Tamcot73 WK11L X263 and 
+-Row.pattern with levels skip and solid.
+
+The trials were conducted at 3 locations (Loc with levels Weslaco, CollSt and CorpCh). Moreover, the these trials were repeated across 2 years (Year with levels 2018 and 2017)
+.
+Thus, there are 3 trials with repeated measures across 2 years, respectively. Similar experimental designs (with different randomizations) were used at each location and in each year.
+
+
+Before anything, the columns Year, Rep should be encoded as factors, since R by default encoded them as integer. Also lint_Ac, Mic, Length, Unif, strength and wlongation should be encoded as integer. Lastly remove the last two colunms.
+
+```{r}
+data1 <- data1 %>% 
+  mutate_at(vars(Year, Rep, Env), as.factor)
+
+data1 <- data1 %>% 
+  mutate_at(vars(Lint_Pct:Elongation), as.integer)
+
+data1 <- subset (data1, select = -c(X:X.1 ))
+
+head(data1)
+```
+
+We grouped the locations and years and classified them as 6 different environments
+For the first environment:
+```{r}
+library(agricolae)
+data <- data1[data1$Env==1,]
+attach(data)
+model <- sp.plot(
+                 block = Rep, 
+                 pplot = Variety, 
+                 splot = Row.pattern, 
+                 Y = Lint_Ac)
+
+```
+```{r}
+data <- data1[data1$Env==2,]
+attach(data)
+model <- sp.plot(
+                 block = Rep, 
+                 pplot = Variety, 
+                 splot = Row.pattern, 
+                 Y = Lint_Ac)
+
+data <- data1[data1$Env==3,]
+attach(data)
+model <- sp.plot(
+                 block = Rep, 
+                 pplot = Variety, 
+                 splot = Row.pattern, 
+                 Y = Lint_Ac)
+
+
+data <- data1[data1$Env==4,]
+attach(data)
+model <- sp.plot(
+                 block = Rep, 
+                 pplot = Variety, 
+                 splot = Row.pattern, 
+                 Y = Lint_Ac)
+
+data <- data1[data1$Env==5,]
+attach(data)
+model <- sp.plot(
+                 block = Rep, 
+                 pplot = Variety, 
+                 splot = Row.pattern, 
+                 Y = Lint_Ac)
+
+data <- data1[data1$Env==6,]
+attach(data)
+model <- sp.plot(
+                 block = Rep, 
+                 pplot = Variety, 
+                 splot = Row.pattern, 
+                 Y = Lint_Ac)
+```
+
+Based on the result from 6 environments, it shows there is no interaction between variety and row pattern, which means row pattern will not influence variety's yield ranking.
+
+
+library(ggplot2)
+ggplot(aes(x = Row.pattern, y = Lint_Pct,  group= Variety, colour = Variety), data = data1) + geom_line() + 
+  facet_wrap(~ Env) + theme_bw()
+
+```{r}
+ggplot(data1,aes(x=Variety,y=Lint_Pct)) + 
+  geom_smooth(aes(group = Row.pattern,color = Row.pattern),method = 'lm',formula = 'y~factor(x)')
+```
+
+
+```{r}
+ggplot(data1,aes(x=Row.pattern,y=Lint_Pct)) + 
+  geom_jitter(width = 0.1) + 
+  facet_wrap(~Variety,labeller = label_both) # This line separates the plots into separate plots for each Variety
+```
+
+```{r}
+ggplot(data1,aes(x=Row.pattern,y=Lint_Pct)) + 
+  geom_jitter(aes(color = Env),width = 0.1) + 
+  facet_wrap(~Variety,labeller = label_both) # This line separates the plots into separate plots for each Variety
+```
+
+For combined analysis of split-plot design acorss locations and years, I used SAS v.9.4 (SAS v.9.4, SAS Institute, 2015). Location is fixed and year is random effect. The combined analysis can provide information about how treatmenta or combinations of treatments react to different soil types and weather etc. 
+Firstly, we checked the homogeneity of the error variance at various locations by using Hartley's HOV Maximum F-test. Result showed cariances are homogenenous, we can proceed with the combined analysis from all locations. Here is how SAS calculated Mean sqaure for each variance.
+
+![](combined.png)
+
+My result is showed below, which shows row pattern does not influence lint yield.
+
+![](result.png)
+
+
