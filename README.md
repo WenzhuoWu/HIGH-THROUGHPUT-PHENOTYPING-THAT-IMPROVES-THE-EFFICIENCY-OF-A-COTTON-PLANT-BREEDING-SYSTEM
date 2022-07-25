@@ -1,2 +1,2 @@
-# HIGH-THROUGHPUT-PHENOTYPING-THAT-IMPROVES-THE-EFFICIENCY-OF-A-COTTON-PLANT-BREEDING-SYSTEM
+# High-throughput phenotyping that Improve the Efficiency of Cotton Breeding System
 Master thesis at Texas A&amp;M University
